@@ -154,21 +154,88 @@ test('아이템 검사 — 품번 필수·중복, 공정 목록에 없는 공정
   assert.deepEqual(L.flowOf(ok.item), ['가공', '용접', '출하']);
 });
 
-test('관리 아이템 엑셀 — 양식 → 쓰고 다시 읽기, 새 공정 알림, 같은 품번은 바꿈(id 유지)', () => {
+// 엑셀로 쓰고 다시 읽기(앱과 같은 방식)
+function roundTrip(aoa) {
+  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(aoa), 'x');
+  return XLSX.utils.sheet_to_json(XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })).Sheets.x, { header: 1, raw: true, defval: null });
+}
+// 10-30 받은 실제 목록과 같은 모양(값은 지어낸 것) — 한 줄에 공정 하나, 같은 품번을 공정 수만큼, 마지막 줄 「출하」
+function longSheet() {
+  const H = ['고객사', '그룹', '상세그룹', '품목', '품번', '비고', '공정'];
+  const rows = [];
+  [['X-100', '10ton'], ['X-200', '12ton']].forEach(([part, note]) => ['가공', '용접', 'MT', '검사', '출하'].forEach(pr => rows.push(['고객사C', '중형', '하부', '프레임', part, note, pr])));
+  return [H].concat(rows);
+}
+
+test('관리 아이템 엑셀(한 줄에 공정 하나 · 실제 목록 모양) — 품번별로 모아 위→아래가 공정 순서, 출하 줄은 자동, 새 공정 알림', () => {
+  const p = L.parseItemSheet(roundTrip(longSheet()), ['가공', '용접', '도장']);
+  assert.equal(p.format, 'long');
+  assert.deepEqual(p.errors, []);
+  assert.equal(p.rows.length, 2);
+  assert.deepEqual(p.rows.map(r => r.part), ['X-100', 'X-200']);
+  assert.deepEqual(p.rows[0].route, ['가공', '용접', 'MT', '검사']);
+  assert.deepEqual(L.flowOf(p.rows[1]), ['가공', '용접', 'MT', '검사', '출하']);
+  assert.equal(p.rows[1].note, '12ton'); assert.equal(p.rows[0].customer, '고객사C');
+  assert.deepEqual(p.newProcesses, ['MT', '검사']);
+});
+
+test('관리 아이템 엑셀(한 줄에 공정 하나) — 품번 빈 칸은 위 품번 이어 씀(셀 병합), 줄마다 다른 값 알림, 출하만 있는 품번·두 번 나온 공정 거부', () => {
+  const aoa = [['관리 아이템'], ['고객사', '그룹', '상세그룹', '품목', '품번', '비고', '공정'],
+    ['고객사C', '소형', '상부', '커버', 'Y-1', '', '가공'], [null, null, null, null, null, null, '도장'], ['고객사C', '소형', '상부', '커버', 'Y-1', '', '출하'],
+    ['고객사C', '소형', '상부', '커버', 'Y-2', 'A', '가공'], ['고객사C', '대형', '상부', '커버', 'Y-2', 'A', '도장'],
+    ['고객사C', '소형', '상부', '커버', 'Y-3', '', '출하'],
+    ['고객사C', '소형', '상부', '커버', 'Y-4', '', '가공'], ['고객사C', '소형', '상부', '커버', 'Y-4', '', '가공']];
+  const p = L.parseItemSheet(roundTrip(aoa), ['가공', '도장']);
+  assert.equal(p.format, 'long');
+  assert.deepEqual(p.rows.map(r => r.part + ':' + r.route.join('>')), ['Y-1:가공>도장', 'Y-2:가공>도장']);
+  assert.equal(p.rows[1].group, '소형'); // 첫 줄 값
+  assert.ok(p.errors.some(e => /Y-2/.test(e.msg) && /그룹/.test(e.msg)));
+  assert.ok(p.errors.some(e => /Y-3/.test(e.msg) && /공정을 하나 이상/.test(e.msg)));
+  assert.ok(p.errors.some(e => /Y-4/.test(e.msg) && /두 번/.test(e.msg)));
+});
+
+test('관리 아이템 엑셀 — 받은 양식·지금 아이템 받기는 실제 목록 모양(출하 줄 포함), 다시 넣으면 그대로, 같은 품번은 바꿈(id 유지)', () => {
   const tpl = L.itemTemplate(['가공', '용접']);
+  assert.deepEqual(tpl[0], ['고객사', '그룹', '상세그룹', '품목', '품번', '비고', '공정']);
   assert.equal(tpl[1][0], '고객사A'); // 양식 예시는 가짜 고객사
+  assert.deepEqual(tpl.slice(1).map(r => r[6]), ['가공', '용접', '출하']);
   const db = small();
-  const aoa = L.itemSheet(db.items).concat([['고객사C', 'G3', '', '브래킷', 'C-1', '', '가공 > 연마'], ['', '', '', '', 'A-1', '', '가공'], ['', '', '', '', '', '', '']]);
-  const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([['관리 아이템 목록']].concat(aoa)), 'x');
-  const back = XLSX.utils.sheet_to_json(XLSX.read(XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' })).Sheets.x, { header: 1, raw: true, defval: null });
-  const p = L.parseItemSheet(back, db.processes);
-  assert.equal(p.rows.length, 3);
-  assert.deepEqual(p.newProcesses, ['연마']);
-  assert.equal(p.errors.length, 1); assert.match(p.errors[0].msg, /같은 품번/);
+  const sheet = L.itemSheet(db.items);
+  assert.equal(sheet.length, 1 + 4 + 3); // A-1 가공·용접·도장·출하, B-1 가공·도장·출하
+  const p = L.parseItemSheet(roundTrip(sheet), db.processes);
+  assert.equal(p.format, 'long'); assert.deepEqual(p.errors, []); assert.deepEqual(p.newProcesses, []);
+  assert.deepEqual(p.rows.map(r => r.part + ':' + r.route.join('>')), db.items.map(r => r.part + ':' + r.route.join('>')));
   p.rows[0].note = '바뀜';
   const m = L.mergeItems(db.items, p.rows);
-  assert.deepEqual(m, { added: 1, updated: 2 });
+  assert.deepEqual(m, { added: 0, updated: 2 });
   assert.equal(db.items[0].id, 'a'); assert.equal(db.items[0].note, '바뀜');
+});
+
+test('관리 아이템 엑셀(한 줄에 아이템 하나 · 3차 첫 판) — 「공정 순서」 칸도 그대로 읽음', () => {
+  const db = small();
+  const aoa = [['관리 아이템 목록'], L.ITEM_HEAD_WIDE, ['고객사A', 'G1', 'S1', '프레임', 'A-1', '', '가공 > 용접 > 도장'],
+    ['고객사C', 'G3', '', '브래킷', 'C-1', '', '가공 > 연마'], ['', '', '', '', 'A-1', '', '가공'], ['', '', '', '', '', '', '']];
+  const p = L.parseItemSheet(roundTrip(aoa), db.processes);
+  assert.equal(p.format, 'wide');
+  assert.equal(p.rows.length, 2);
+  assert.deepEqual(p.newProcesses, ['연마']);
+  assert.equal(p.errors.length, 1); assert.match(p.errors[0].msg, /같은 품번/);
+  const m = L.mergeItems(db.items, p.rows);
+  assert.deepEqual(m, { added: 1, updated: 1 });
+});
+
+test('10-30 답 — 출하도 공정 실적으로(직접 적기·타이머), C/T 는 인원과 무관하게 순작업 시간 ÷ 수량, 첫 공정은 자재 차감 없음', () => {
+  const db = small();
+  const v = L.validateManual({ date: '2026-10-14', itemId: 'a', process: '출하', qty: '2', minutes: '10' }, db);
+  assert.ok(v.ok); db.results.push(v.result);
+  const t0 = L.localMs('2026-10-14', '10:00'); const t = L.timerStart('a', '출하', t0); const f = L.timerFinish(t, 1, t0 + 60000);
+  assert.ok(f.ok); db.results.push(f.result);
+  const a = L.computeStock(db).find(o => o.item.id === 'a');
+  assert.equal(a.shipped, 5 + 2 + 1);
+  assert.equal(a.stock['도장'], 3 + 4 - 5 - 2 - 1);
+  assert.equal(a.stock['가공'], 10 + 7 - 6); // 첫 공정: 자재를 빼지 않음
+  const ct = L.ctTable(db.results).find(c => c.itemId === 'a' && c.process === '출하');
+  assert.equal(ct.ct, (600 + 60) / 3);
 });
 
 test('기초재고 엑셀 — 양식 → 다시 읽기(기준날짜·「-」·없는 품번·공정 순서 밖 칸)', () => {

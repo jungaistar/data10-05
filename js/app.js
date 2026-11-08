@@ -6,7 +6,7 @@
   var L = window.PPLogic, S = window.PPStore, C = window.PPCharts, AIP = window.AIPanel;
   /* 판 맞추기 — 브라우저가 옛 logic.js 와 새 app.js 를 섞어 쓰면(Pages 캐시) 계산하지 않고 새로고침을 안내합니다.
      판은 scripts/bump-version.mjs 로 index.html(?v=) · logic.js 와 함께 올립니다. */
-  var APP_VERSION = '2026-10-28.1';
+  var APP_VERSION = '2026-11-08.1';
   if (!L || L.VERSION !== APP_VERSION) {
     var m0 = document.getElementById('main') || document.body;
     m0.innerHTML = '<section class="card" id="versionMismatch"><h1>새 판이 나왔습니다 — 새로고침(Ctrl+F5)해 주세요</h1><p class="alert warn">이 브라우저가 옛 파일과 새 파일을 섞어 불러왔습니다(js/logic.js ' +
@@ -192,7 +192,7 @@
     });
     var ctp = r.ctProc.filter(function (c) { return c.n; });
     out.push(h('section', { class: 'card' }, h('h2', null, '실제 걸린 시간 (C/T)'),
-      h('p', { class: 'note' }, 'C/T(개당 걸린 시간) = 순작업 시간(시작~종료에서 멈춘 사이를 뺀 시간) ÷ 수량. 시간이 있는 실적만 씁니다(기초재고 기준날짜 전 실적 포함).'),
+      h('p', { class: 'note' }, 'C/T(개당 걸린 시간) = 순작업 시간(시작~종료에서 멈춘 사이를 뺀 시간) ÷ 수량. 작업 인원 수는 따지지 않습니다(여러 명이 함께 해도 그 작업에 걸린 시간 그대로). 시간이 있는 실적만 씁니다(기초재고 기준날짜 전 실적 포함).'),
       h('div', { class: 'charts one' }, C.figure('공정별 평균 C/T (초/개)', { type: 'bar', unit: '초', labels: ctp.map(function (c) { return c.process; }), series: [{ name: 'C/T', values: ctp.map(function (c) { return L.round(c.ct, 1); }), color: 'var(--series-1)' }] })),
       table(['품번', '공정', '실적 건수', '수량', '순작업 합계', 'C/T(개당)', '가장 짧은 ~ 긴', ''], ctRows, { num: [0, 0, 1, 1, 1, 1, 0, 0], empty: '시간이 있는 실적이 없습니다 — 실적 입력의 시작·종료 단추로 재면 쌓입니다.' })));
     return out;
@@ -215,7 +215,7 @@
 
   /* ── 1. 실적 입력 (타이머 · 직접 적기) ───────── */
   function pageEntry() {
-    var head = pageHead('① 실적 입력', '공정 실적', '아이템과 공정을 고르고 시작 → (멈춤 · 다시 시작) → 종료 때 수량을 적으면 실적 한 건이 됩니다. 새로고침하거나 화면을 꺼도 타이머는 이어집니다.');
+    var head = pageHead('① 실적 입력', '공정 실적', '아이템과 공정을 고르고 시작 → (멈춤 · 다시 시작) → 종료 때 수량을 적으면 실적 한 건이 됩니다. 출하도 같은 방법으로 「출하」 공정 실적으로 적습니다. 새로고침하거나 화면을 꺼도 타이머는 이어집니다.');
     if (!db.items.length) return [head, needItems()];
     var tabs = h('div', { class: 'seg', role: 'tablist', style: 'margin-bottom:14px' }, [['timer', '타이머로 재기'], ['manual', '직접 적기']].map(function (x) {
       var r = h('input', { type: 'radio', name: 'tab', value: x[0] }); if (ui.tab === x[0]) r.checked = true;
@@ -505,7 +505,7 @@
         var best = null;
         sheets.forEach(function (s) { var o = L.parseItemSheet(s.aoa, db.processes); if (!best || o.rows.length > best.rows.length) best = o; });
         if (!best || !best.rows.length) { toast((best && best.errors[0] && best.errors[0].msg) || '읽을 아이템이 없습니다.', true); return; }
-        var msg = [file.name + ' — 아이템 ' + best.rows.length + '개'];
+        var msg = [file.name + ' — 아이템 ' + best.rows.length + '개' + (best.format === 'long' ? ' (한 줄에 공정 하나 모양 — 같은 품번의 줄을 위에서 아래 순서로 공정 순서로 읽음)' : '')];
         if (best.newProcesses.length) msg.push('공정 목록에 새로 넣을 공정: ' + best.newProcesses.join(', '));
         best.errors.slice(0, 6).forEach(function (e) { msg.push(e.row + '행: ' + e.msg); });
         msg.push('같은 품번은 내용을 바꾸고(실적·기초재고 유지), 새 품번은 추가합니다.');
@@ -542,7 +542,7 @@
       } }, '지우기')]);
     });
     return h('section', { class: 'card' }, h('h2', null, '관리 아이템 ' + db.items.length + '개'),
-      h('p', { class: 'note' }, '공정 순서는 「가접 > 로봇 > 사상」처럼 「>」나 쉼표로 적습니다. 칸을 고치고 다른 곳을 누르면 저장됩니다.'),
+      h('p', { class: 'note' }, '공정 순서는 「가접 > 로봇 > 사상」처럼 「>」나 쉼표로 적습니다. 칸을 고치고 다른 곳을 누르면 저장됩니다. 엑셀은 한 줄에 공정 하나(고객사 · 그룹 · 상세그룹 · 품목 · 품번 · 비고 · 공정)로 적고, 같은 품번의 줄을 위에서 아래 순서로 공정 순서로 읽습니다(「출하」 줄은 있어도 되고 없어도 됨). 예전의 「공정 순서」 한 칸 양식도 읽습니다.'),
       table(L.ITEM_FIELDS.map(function (f) { return f.label; }).concat(['공정 순서 (> 출하 자동)', '']), rows, { cls: 'items', empty: '아이템이 없습니다.' }),
       h('h3', { style: 'margin-top:16px' }, '아이템 추가'),
       h('div', { class: 'form-grid' }, L.ITEM_FIELDS.map(function (f) { return fld(f.label, ins[f.key], null, E[f.key]); }),

@@ -15,7 +15,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
   /* 판(版) — index.html 의 ?v= · app.js 의 APP_VERSION 과 같아야 합니다(scripts/bump-version.mjs 로 함께 올림). */
-  var VERSION = '2026-10-28.1';
+  var VERSION = '2026-11-08.1';
 
   /* 저장 형식 판. 1 = 1·2차(발주서·재고 체크·과부족), 2 = 3차(아이템·기초재고·공정 실적·타이머) */
   var SCHEMA_VERSION = 2;
@@ -181,11 +181,16 @@
   }
 
   // ── 4. 엑셀 양식 — 관리 아이템 · 기초재고 ────────────
-  var ITEM_HEAD = ['고객사', '그룹', '상세그룹', '품목', '품번', '비고', '공정 순서'];
+  /* 관리 아이템 양식은 두 모양을 다 읽습니다.
+     · 한 줄에 공정 하나(기본 · 10-30 받은 실제 목록 모양) — 「고객사 | 그룹 | 상세그룹 | 품목 | 품번 | 비고 | 공정」,
+       같은 품번을 공정 수만큼 줄로 적고 위에서 아래 순서가 곧 공정 순서. 「출하」 줄은 있어도 되고 없어도 됩니다(자동으로 마지막).
+     · 한 줄에 아이템 하나(3차 첫 판) — 마지막 칸 「공정 순서」에 「가접 > 로봇 > 사상」. */
+  var ITEM_HEAD = ['고객사', '그룹', '상세그룹', '품목', '품번', '비고', '공정'];
+  var ITEM_HEAD_WIDE = ['고객사', '그룹', '상세그룹', '품목', '품번', '비고', '공정 순서'];
   var HEAD_SYN = {
     customer: ['고객사', '고객', '거래처', '납품처'], group: ['그룹', '제품군', '차급'], subgroup: ['상세그룹', '세부그룹', '하위그룹'],
     product: ['품목', '품명', '제품'], part: ['품번', '품목코드', '부품번호', '자재코드', 'partno'], note: ['비고', '메모'],
-    route: ['공정순서', '공정', '공정경로', 'route']
+    route: ['공정순서', '공정', '공정명', '공정경로', 'route']
   };
   function normHeader(s) { return str(s).toLowerCase().replace(/[\s_()\[\]\-·.:/#]/g, ''); }
   function headerMap(row, keys) {
@@ -196,36 +201,83 @@
     });
     return map;
   }
+  function itemRowHead(it) { return [it.customer, it.group, it.subgroup, it.product, it.part, it.note]; }
+  /** 지금 아이템 → 한 줄에 공정 하나 모양(출하 줄 포함). 다시 넣으면 그대로 읽힙니다 */
   function itemSheet(items) {
-    return [ITEM_HEAD].concat(items.map(function (it) { return [it.customer, it.group, it.subgroup, it.product, it.part, it.note, routeText(it)]; }));
+    var out = [ITEM_HEAD];
+    items.forEach(function (it) { flowOf(it).forEach(function (p) { out.push(itemRowHead(it).concat([p])); }); });
+    return out;
   }
   function itemTemplate(processes) {
-    var p = (processes && processes.length ? processes : ['공정1', '공정2']).slice(0, 3).join(' > ');
-    return [ITEM_HEAD, ['고객사A', '중형', '하부', '프레임', 'SMP-1001', '3PCS 세트', p]];
+    var procs = (processes && processes.length ? processes : ['공정1', '공정2']).slice(0, 3);
+    var it = { customer: '고객사A', group: '중형', subgroup: '하부', product: '프레임', part: 'SMP-1001', note: '3PCS 세트', route: procs };
+    return itemSheet([it]);
   }
-  /** 관리 아이템 엑셀 → { rows:[item], errors:[{row, msg}], newProcesses:[] }. 공정 목록에 없는 공정 이름은 newProcesses 로 알려 줌(반영하면 공정 목록에 추가) */
+  function rowItemFields(row, map) { var o = {}; ITEM_FIELDS.forEach(function (f) { o[f.key] = map[f.key] == null ? '' : row[map[f.key]]; }); return o; }
+  /** 관리 아이템 엑셀 → { rows:[item], errors:[{row, msg}], newProcesses:[], format:'long'|'wide' }.
+      공정 목록에 없는 공정 이름은 newProcesses 로 알려 줌(반영하면 공정 목록에 추가) */
   function parseItemSheet(aoa, processes) {
-    var out = { rows: [], errors: [], newProcesses: [] };
+    var out = { rows: [], errors: [], newProcesses: [], format: null };
     var hr = -1, map = null;
     for (var i = 0; i < Math.min(aoa.length, 15); i++) {
       var m = headerMap(aoa[i], Object.keys(HEAD_SYN));
       if (m.part != null && m.route != null) { hr = i; map = m; break; }
     }
-    if (hr < 0) { out.errors.push({ row: 0, msg: '머리행(「품번」「공정 순서」 열)을 찾지 못했습니다 — 양식 받기로 받은 모양에 맞춰 주세요.' }); return out; }
-    var seen = {};
+    if (hr < 0) { out.errors.push({ row: 0, msg: '머리행(「품번」「공정」 열)을 찾지 못했습니다 — 양식 받기로 받은 모양에 맞춰 주세요.' }); return out; }
     var known = (processes || []).slice();
+    function learn(names) { parseRoute(names, known).unknown.forEach(function (n) { if (known.indexOf(n) < 0) { known.push(n); out.newProcesses.push(n); } }); }
+    function routeNames(v) { return String(v == null ? '' : v).split(/\s*(?:>|→|,|，|\/|\n|\t)\s*/).map(normName).filter(Boolean); }
+    var data = [];
     for (var r = hr + 1; r < aoa.length; r++) {
       var row = aoa[r] || [];
       if (!row.some(function (v) { return str(v) !== ''; })) continue;
-      var input = {}; Object.keys(map).forEach(function (k) { input[k] = row[map[k]]; });
-      var pr = parseRoute(input.route, known);
-      pr.unknown.forEach(function (n) { if (known.indexOf(n) < 0) { known.push(n); out.newProcesses.push(n); } });
-      var v = validateItem(input, known, out.rows);
-      if (v.item.part && seen[v.item.part]) { out.errors.push({ row: r + 1, msg: v.item.part + ' — 같은 품번이 위에 또 있습니다(아래 줄은 건너뜀)' }); continue; }
-      if (!v.ok) { out.errors.push({ row: r + 1, msg: (v.item.part || '(품번 없음)') + ' — ' + Object.keys(v.errors).map(function (k) { return v.errors[k]; }).join(' · ') }); continue; }
-      seen[v.item.part] = 1;
-      out.rows.push(v.item);
+      data.push({ r: r + 1, row: row, names: routeNames(row[map.route]), part: normPart(row[map.part]) });
     }
+    // 모양 판별 — 모든 줄의 공정 칸이 이름 하나 이하이고, 품번이 두 줄 이상 나오거나 품번이 빈(위 칸을 이어 쓰는) 줄이 있으면 「한 줄에 공정 하나」
+    var cnt = {}; data.forEach(function (d) { if (d.part) cnt[d.part] = (cnt[d.part] || 0) + 1; });
+    var long = data.length && data.every(function (d) { return d.names.length <= 1; }) &&
+      (Object.keys(cnt).some(function (k) { return cnt[k] > 1; }) || data.some(function (d) { return !d.part && d.names.length; }));
+    out.format = long ? 'long' : 'wide';
+    if (!long) {
+      var seen = {};
+      data.forEach(function (d) {
+        var input = rowItemFields(d.row, map); input.route = d.row[map.route];
+        learn(d.names);
+        var v = validateItem(input, known, out.rows);
+        if (v.item.part && seen[v.item.part]) { out.errors.push({ row: d.r, msg: v.item.part + ' — 같은 품번이 위에 또 있습니다(아래 줄은 건너뜀)' }); return; }
+        if (!v.ok) { out.errors.push({ row: d.r, msg: (v.item.part || '(품번 없음)') + ' — ' + Object.keys(v.errors).map(function (k) { return v.errors[k]; }).join(' · ') }); return; }
+        seen[v.item.part] = 1;
+        out.rows.push(v.item);
+      });
+      return out;
+    }
+    // 한 줄에 공정 하나 — 품번별로 모아 위에서 아래 순서로 공정 순서를 만듦. 품번 칸이 비면(셀 병합 등) 바로 위 품번을 이어 씀
+    var groups = [], byPart = {}, last = null;
+    data.forEach(function (d) {
+      var part = d.part || (last && last.part);
+      if (!part) { out.errors.push({ row: d.r, msg: '(품번 없음) — 품번을 적어 주세요' }); return; }
+      var g = byPart[part];
+      var f = rowItemFields(d.row, map);
+      if (!g) { g = byPart[part] = { part: part, row: d.r, fields: f, names: [], diff: [] }; groups.push(g); }
+      else if (d.part) {
+        ITEM_FIELDS.forEach(function (x) {
+          if (x.key === 'part') return;
+          var a = normName(g.fields[x.key]), b = normName(f[x.key]);
+          if (!a && b) g.fields[x.key] = f[x.key];
+          else if (b && a !== b && g.diff.indexOf(x.label) < 0) g.diff.push(x.label);
+        });
+      }
+      if (d.names.length) g.names.push(d.names[0]);
+      last = g;
+    });
+    groups.forEach(function (g) {
+      learn(g.names);
+      var input = Object.assign({}, g.fields, { part: g.part, route: g.names });
+      var v = validateItem(input, known, out.rows);
+      if (g.diff.length) out.errors.push({ row: g.row, msg: g.part + ' — 줄마다 ' + g.diff.join('·') + ' 값이 다릅니다(첫 줄 값으로 넣음)' });
+      if (!v.ok) { out.errors.push({ row: g.row, msg: g.part + ' — ' + Object.keys(v.errors).map(function (k) { return v.errors[k]; }).join(' · ') }); return; }
+      out.rows.push(v.item);
+    });
     return out;
   }
   /** 가져온 아이템을 지금 목록에 합침 — 같은 품번은 내용을 바꾸고(id 유지 → 실적·기초재고 그대로), 새 품번은 추가 */
@@ -565,7 +617,7 @@
 
   return {
     VERSION: VERSION, SCHEMA_VERSION: SCHEMA_VERSION, SHIP: SHIP, DEV_PCT: DEV_PCT, WEEKDAY_KO: WEEKDAY_KO,
-    ITEM_FIELDS: ITEM_FIELDS, FILTER_KEYS: FILTER_KEYS, ITEM_HEAD: ITEM_HEAD, RESULT_HEAD: RESULT_HEAD, ITEM_ALIAS: ITEM_ALIAS, CUST_ALIAS: CUST_ALIAS,
+    ITEM_FIELDS: ITEM_FIELDS, FILTER_KEYS: FILTER_KEYS, ITEM_HEAD: ITEM_HEAD, ITEM_HEAD_WIDE: ITEM_HEAD_WIDE, RESULT_HEAD: RESULT_HEAD, ITEM_ALIAS: ITEM_ALIAS, CUST_ALIAS: CUST_ALIAS,
     parseDate: parseDate, addDays: addDays, weekday: weekday, daysBetween: daysBetween, fmtDate: fmtDate, shortDate: shortDate, todayIso: todayIso, hhmm: hhmm, localMs: localMs,
     parseNum: parseNum, parseQty: parseQty, round: round, fmtN: fmtN, fmtPct: fmtPct, fmtDur: fmtDur, fmtClock: fmtClock, normPart: normPart, newId: newId,
     parseRoute: parseRoute, validateItem: validateItem, flowOf: flowOf, routeText: routeText, filterItems: filterItems, filterOptions: filterOptions,
