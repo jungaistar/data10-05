@@ -8,6 +8,7 @@ window.AUTH_CONFIG = {
   "kakao": true,
   "idleMinutes": 30,
   "localBypass": true,
+  "board": true,
   "site": {
     "title": "공정 재고 · C/T",
     "summary": "기초재고를 한 번 적고 현장에서 공정 실적(시작 · 멈춤 · 다시 시작 · 종료)을 넣으면 아이템 · 공정별 지금 재고, 실제 걸린 시간(C/T), 공정별 일별 생산수량을 보여 주는 도구입니다.",
