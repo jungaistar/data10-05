@@ -15,7 +15,7 @@
 })(typeof self !== 'undefined' ? self : this, function () {
   'use strict';
   /* 판(版) — index.html 의 ?v= · app.js 의 APP_VERSION 과 같아야 합니다(scripts/bump-version.mjs 로 함께 올림). */
-  var VERSION = '2026-11-11.2';
+  var VERSION = '2026-11-11.4';
 
   /* 저장 형식 판. 1 = 1·2차(발주서·재고 체크·과부족), 2 = 3차(아이템·기초재고·공정 실적·타이머) */
   var SCHEMA_VERSION = 2;
